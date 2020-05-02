@@ -1,0 +1,12 @@
+name: burn_app
+title: burn_app
+username:
+account: samstein
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 2228484
+bundleId: 3093259
+url: https://samstein.shinyapps.io/burn_app/
+when: 1588413121.94966
+asMultiple: FALSE
+asStatic: FALSE

@@ -1,0 +1,62 @@
+---
+title: "FireDBR_calcs"
+author: "Samantha Hing"
+date: "4/21/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# load packages
+library(raster)
+```
+
+```{r}
+# download all dbr tif files 
+path = 'data/BurnSev_110Fires/'
+list_files <- list.files(path, pattern = '.tif')
+
+# create raster for each .tif file
+rasterList <- list()
+dbr_means <- vector()
+for (i in 1:length(list_files)) {
+  rasterList[[i]] <- raster(paste0(path, list_files[i]))
+  dbr_means[i] <- cellStats(rasterList[[i]], 'mean') # calculate mean for each raster
+}
+
+# get objectIDs
+OBJECTID <- as.numeric(substr(list_files, 1, 5))
+
+# name rasters
+names(rasterList) <- OBJECTID
+
+# join data in one data.frame
+dbr_data <- data.frame(OBJECTID, dbr_means)
+
+# recode dbr mean into severity class
+dbr_data <- dbr_data %>% 
+  mutate(mean_severity = case_when(
+    dbr_means >= -1000 & dbr_means <= -251 ~ 7,
+    dbr_means > -251 & dbr_means <= -101 ~ 6,
+    dbr_means > -101 & dbr_means <= 99 ~ 5,
+    dbr_means > 99 & dbr_means <= 269 ~ 4,
+    dbr_means > 269 & dbr_means <= 439 ~ 3, 
+    dbr_means > 439 & dbr_means <= 659 ~ 2,
+    dbr_means > 659 & dbr_means <= 2000 ~1)) %>%
+  
+  mutate(mean_severityClass = recode(mean_severity,
+                                     `7` = "Enhanced regrowth, high",
+                                     `6` = "Enhanced regrowth, low",
+                                     `5` = "Unburned",
+                                     `4` = "Low severity",
+                                     `3` = "Moderate to low severity",
+                                     `2` = "Moderate to high severity",
+                                     `1` = "High severity"))
+
+
+#write_csv(dbr_data,  "./data/dbr_data.csv")
+```

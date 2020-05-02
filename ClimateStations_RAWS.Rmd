@@ -1,0 +1,270 @@
+---
+title: "Untitled"
+author: "Samantha Hing"
+date: "4/15/2020"
+output: html_document
+---
+#### Load packages
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(sf)
+library(sp)
+library(rnaturalearth)
+library(ggplot2)
+library(rgdal)
+library(nngeo)
+library(lubridate)
+library(fs)
+library(purrr)
+
+```
+
+#### Read in data
+```{r}
+# read in stations data
+stations <- read.fwf("data/RAWS.txt", widths = c(28, 14, 8, 4, 2, 4, 6, 2, 2), 
+         col.names = c("station", "state", "elevation", "lat_dd","lat_mm","lat_ss","long_dd", "long_mm", "long_ss"), skip = 3, colClasses = c("character", "character", "integer", "integer", "integer", "integer", "integer", "integer", "integer"), stringsAsFactors = FALSE, nrow = 493)
+
+# stations <- stations %>%
+#   separate(latitude, into = c('lat_dd', 'lat_mm', 'lat_ss'), sep = c(2, 4)) %>%
+#   mutate(ns = rep('W', nrow(stations))) 
+
+stations <- stations %>% mutate(ns_long = rep('W', nrow(stations)), ns_lat = rep('N', nrow(stations)))
+
+stations <- stations %>% 
+  mutate(latitude =  biogeo::dms2dd(lat_dd, lat_mm, lat_ss, ns_lat), 
+         longitude =  biogeo::dms2dd(long_dd, long_mm, long_ss, ns_long))
+
+# read in fire data
+fires <- read_sf(dsn = "./data/fire_data", layer = "110fires_sample")
+#plot(fires)
+```
+
+### Plot stations
+```{r}
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+max_lat <- max(stations$latitude)
+min_lat <- min(stations$latitude)
+max_long <- max(stations$longitude)
+min_long <- min(stations$longitude)
+
+ggplot(data = world) +
+    geom_sf() +
+    geom_point(data = stations, aes(x = longitude, y = latitude), size = 4, 
+        shape = 23, fill = "darkred") +
+    coord_sf(xlim = c(min_long, max_long), ylim = c(min_lat, max_lat), expand = FALSE)
+```
+
+### Convert data
+```{r converting data}
+#convert data for next step
+#making spatial files to try with rgeos
+stations_sp <- stations
+coordinates(stations_sp)=~longitude+latitude
+proj4string(stations_sp)<- CRS("+proj=longlat +ellps=WGS84") #guessing at original data's projection
+
+stations_sp <-spTransform(stations_sp, CRS="+proj=utm +zone=10 +datum=NAD83") #change to UTM to match fire data
+
+fires_sp <- as(fires, "Spatial")
+
+#making sf files to try with sf
+stations_sf <- st_as_sf(stations_sp)
+stations_sf <- st_transform(stations_sf, crs = st_crs(fires)) #set crs to match fire data
+
+#st_write(stations_sf, dsn = "./data/stations_v10.shp", layer = "stations_v10.shp")
+```
+
+
+### Find nearest station to each fire
+
+```{r nearest}
+#trying using sf
+fire_centers <- st_centroid(fires, of_largest_polygon = FALSE) #creating points for centroid of fires
+
+#table of just station names by index number
+station_names <- data.frame(stations$station) %>%
+  mutate(station_index = 1:490)
+
+#find 3 closest stations
+backups <- st_nn(fire_centers, stations_sf, k = 3) #modified to select three closest neighbors
+stn_backups <- data.frame(matrix(unlist(backups), ncol = max(lengths(backups)), byrow = TRUE)) #get into df
+
+#join data
+fires_wstns <- fires %>%   #attach index number of each station to fire data
+  mutate(station1 = stn_backups$X1) %>%
+  mutate(station2 = stn_backups$X2) %>%
+  mutate(station3 = stn_backups$X3)
+ 
+fires_wstns <- left_join(fires_wstns, station_names, by = c("station1" = "station_index")) %>%
+  rename(stn_1 = stations.station)
+  
+fires_wstns <- left_join(fires_wstns, station_names, by = c("station2" = "station_index")) %>%
+  rename(stn_2 = stations.station)
+
+fires_wstns <- left_join(fires_wstns, station_names, by = c("station3" = "station_index")) %>%
+  rename(stn_3 = stations.station) %>%
+  dplyr::select(-station1, -station2, -station3)
+
+#st_write(fires_wstns, dsn = "./data/fire_data/fires_wstns.shp", layer = "fires_wstns.shp")
+
+```
+## Process RAWS data
+
+### read in RAWS csv files
+
+```{r read RAWS data}
+
+data_dir <- "data/weather_data" #set location of all RAWS files
+data_dir <- fs::dir_ls(data_dir) #create directory
+
+raw_weather <- data_dir %>%  #read in all csvs into one table
+  map_dfr(read_csv, col_types = cols("date" = col_date(format = "%m/%d/%y"))) %>%
+  dplyr::select(1:19) 
+```
+
+
+```{r ID correct intervals and calc averages}
+
+#create correct time intervals
+
+needed_data <- fires_wstns %>% #pull just the minimum data needed
+  dplyr::select(OBJECTID, stn_1, stn_2, stn_3, ALARM_DATE, CONT_DATE, -geometry)
+
+needed_data$ALARM_DATE <- ymd_hms(needed_data$ALARM_DATE) #convert to dates
+needed_data$CONT_DATE <- ymd_hms(needed_data$CONT_DATE)
+
+#make create time intervals of interest
+
+needed_data$priormonth <- interval(needed_data$ALARM_DATE - days(30), needed_data$ALARM_DATE)
+needed_data$priorweek <- interval(needed_data$ALARM_DATE - days(7), needed_data$ALARM_DATE)
+needed_data$fireduration <- interval(needed_data$ALARM_DATE, needed_data$CONT_DATE)
+
+#join date data with weather data by objectid
+
+weather <- full_join(needed_data, raw_weather, by = c("OBJECTID" = "Fire")) 
+weather %>% as_tibble() %>% dplyr::select(-geometry)
+class(weather) <- 'data.frame'
+
+#Filter out unneeded data points
+
+weather$months <- weather$date %within% weather$priormonth
+weather$weeks <- weather$date %within% weather$priorweek
+weather$fires <- weather$date %within% weather$fireduration
+
+```
+
+```{r do calcs}  
+#calculate data for each time interval
+
+#ave temp
+month_temp <- weather %>% 
+  filter(months == TRUE) %>% #where points were in the month interval
+  group_by(OBJECTID) %>%  #group by fire
+  summarise(month_temp = mean(air_temp_mean_degF, na.rm = TRUE)) 
+
+week_temp <- weather %>%
+  filter(weeks == TRUE) %>%
+  group_by(OBJECTID) %>% 
+  summarise(week_temp = mean(air_temp_mean_degF, na.rm = TRUE))
+
+dur_temp <- weather %>%
+  filter(fires == TRUE) %>%
+  group_by(OBJECTID) %>% 
+  summarise(dur_temp = mean(air_temp_mean_degF, na.rm = TRUE))
+
+#cumulative precip
+month_precip <- weather %>%
+  filter(months == TRUE) %>%
+  group_by(OBJECTID) %>% 
+  summarise(month_precip = sum(precip_inches, na.rm = TRUE))
+
+week_precip <- weather %>%
+  filter(weeks == TRUE) %>%
+  group_by(OBJECTID) %>% 
+  summarise(week_precip = sum(precip_inches, na.rm = TRUE))
+
+#ave humidity
+month_humid <- weather %>%
+  filter(months == TRUE) %>%
+  group_by(OBJECTID) %>% 
+  summarise(month_humid = mean(humidity_mean, na.rm = TRUE))
+
+week_humid <- weather %>%
+  filter(weeks == TRUE) %>%
+  group_by(OBJECTID) %>% 
+  summarise(week_humid = mean(humidity_mean, na.rm = TRUE))
+
+dur_humid <- weather %>%
+  filter(fires == TRUE) %>%
+  group_by(OBJECTID) %>% 
+  summarise(dur_humid = mean(humidity_mean, na.rm = TRUE))
+
+#ave solar radiation
+month_sol <- weather %>%
+  filter(months == TRUE) %>%
+  group_by(OBJECTID) %>% 
+  summarise(month_sol = mean(solar_rad, na.rm = TRUE))
+
+week_sol <- weather %>%
+  filter(weeks == TRUE) %>%
+  group_by(OBJECTID) %>% 
+  summarise(week_sol = mean(solar_rad, na.rm = TRUE))
+
+#ave wind speed
+ave_wind <- weather %>%
+  filter(fires == TRUE) %>%
+  group_by(OBJECTID) %>% 
+  summarise(wind_speed = mean(wind_avg_mph, na.rm = TRUE))
+
+#Max wind speed
+max_wind <- weather %>%
+  filter(fires == TRUE) %>%
+  group_by(OBJECTID) %>% 
+  summarise(wind_max = mean(wind_max_mph, na.rm = TRUE))
+
+```
+
+
+```{r finalize weather data frame}
+#combine calculated weather data
+
+##all_weather <- st_join(month_temp, week_temp, left = TRUE) #error here
+
+all_weather <- full_join(month_temp, week_temp) %>%
+  full_join(dur_temp) %>%
+  full_join(month_precip) %>%
+  full_join(week_precip) %>%
+  full_join(month_humid) %>%
+  full_join(week_humid) %>%
+  full_join(dur_humid) %>%
+  full_join(month_sol) %>%
+  full_join(week_sol) %>%
+  full_join(ave_wind) %>%
+  full_join(max_wind)
+
+fires_weather <- full_join(fires_wstns, all_weather, by = "OBJECTID")
+
+#write_csv(fires_weather,  "./data/fires_weather.csv")
+
+#st_write(fires_weather, dsn = "./data/fire_data/fires_weather3.shp", layer = "fires_weather3.shp")
+
+```
+
+
+```{r}
+# find missing fires
+# no missing fires now
+objectIDs_1 <-na.omit(unique(weather$OBJECTID))
+length(objectIDs_1)
+
+objectIDs_2 <- unique(month_temp$OBJECTID)
+length(objectIDs_2)
+
+objectIDs_missing <- objectIDs_1[!(objectIDs_1 %in% objectIDs_2)]
+objectIDs_missing
+
+```
+```
